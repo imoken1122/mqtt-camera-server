@@ -3,14 +3,14 @@ use tokio::{task, time};
 
 use camera_driver::mock::MockCamera;
 use rumqttc::{self, AsyncClient, Event, MqttOptions, QoS};
-use serde::{Deserialize, Serialize, de};
+use serde::{de, Deserialize, Serialize};
 use std::collections::HashMap;
 use std::error::Error;
 use std::hash::Hash;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
-use std::vec;
-
+use std::{clone, vec};
+use tokio::sync::Mutex;
 #[derive(Debug, PartialEq, Eq)]
 enum CameraCmd {
     GetInfo,
@@ -34,19 +34,12 @@ struct Command {
 }
 
 #[derive(Debug, Clone)]
-struct MQTTServer<T: CameraInterface> {
+struct MQTTServer {
     client: AsyncClient,
-    devices: Vec<Arc<Mutex<T>>>,
 }
-impl<T> MQTTServer<T>
-where
-    T: CameraInterface,
-{
-    fn new(client: AsyncClient, devices: Vec<Arc<Mutex<T>>>) -> Self {
-        Self {
-            client,
-           devices
-        }
+impl MQTTServer {
+    fn new(client: AsyncClient) -> Self {
+        Self { client }
     }
 
     async fn subscribe(&self, topics: &str) {
@@ -61,56 +54,72 @@ where
             .await
             .unwrap();
     }
-    //fn process_camera_cmd(&self,cmd : )
-    async fn run(&self, eventloop: &mut rumqttc::EventLoop) -> Result<(), Box<dyn Error>>{
-        while let Ok(event) = eventloop.poll().await {
-            match event {
-                Event::Incoming(pkt) => match pkt {
-                    rumqttc::Packet::Publish(v) => {
-                        let topic = v.topic;
-                        let payload = std::str::from_utf8(&v.payload).unwrap().to_owned();
-                        let dict: Command = serde_json::from_str(&payload).unwrap();
-                        let camera_idx = dict.camera_idx;
-
-                        println!("topic = {:?}", topic);
-                        println!("idx = {:?}", camera_idx);
-                        println!("camera = {:?}", self.devices[camera_idx as usize].lock().unwrap().get_info());
-                        println!("data = {:?}", dict.data);
-                    }
-                    _ => {
-                        println!("not instr = {:?}", pkt);
-                    }
-                },
-                Event::Outgoing(v) => {
-                    println!("Outgoing = {:?}", v);
-                }
-            }
-        }
-        Ok(())
-    }
 }
 
-#[tokio::main(worker_threads = 1)]
+#[tokio::main()]
 async fn main() {
     //-> Result<(), Box<dyn Error>> {
-    // color_backtrace::install();
-    let devices = vec![Arc::new(Mutex::new(MockCamera::new(0))), Arc::new(Mutex::new(MockCamera::new(1)))];
-
+    let devices = vec![
+        Arc::new(Mutex::new(MockCamera::new(0))),
+        Arc::new(Mutex::new(MockCamera::new(1))),
+    ];
     let mut mqttoptions = MqttOptions::new("test-1", "localhost", 1883);
-        mqttoptions.set_keep_alive(Duration::from_secs(5));
+    mqttoptions.set_keep_alive(Duration::from_secs(5));
+    let (client, mut eventloop) = AsyncClient::new(mqttoptions.clone(), 20);
+    let cli = MQTTServer::new(client);
+    let cli_1 = cli.clone();
+    let cli_2 = cli.clone();
+    task::spawn(async move {
+        cli_1.subscribe(format!("camera/0/instr").as_str()).await;
+        time::sleep(Duration::from_secs(1)).await;
+    });
 
-        let (client, mut eventloop) = AsyncClient::new(mqttoptions.clone(), 10);
-        
-        let cli = MQTTServer::new(client, devices);
-        let cli_1 = cli.clone();
-        tokio::spawn(async move {
-            cli_1
-                .subscribe(format!("camera/instr" ).as_str())
-                .await;
+    task::spawn(async move {
+        cli_2.subscribe(format!("camera/1/instr").as_str()).await;
+        time::sleep(Duration::from_secs(1)).await;
+    });
 
-        });
+    while let Ok(event) = eventloop.poll().await {
+        match event {
+            Event::Incoming(pkt) => match pkt {
+                rumqttc::Packet::Publish(v) => {
+                    let topic = v.topic.as_str();
+                    let payload = std::str::from_utf8(&v.payload).unwrap().to_owned();
+                    let dict: Command = serde_json::from_str(&payload).unwrap();
+                    let camera_idx = dict.camera_idx;
 
-       let t = tokio::spawn( async move  {cli.run(&mut eventloop).await;});
-       t.await.unwrap();
+                    println!("topic = {:?}", topic);
+                    println!("idx = {:?}", camera_idx);
+                    println!("data = {:?}", dict.data);
+                    match topic {
+                        "camera/0/instr" => {
+                            println!("camera 1");
+                            let d = devices[0].clone();
+                            let t = task::spawn(async move {
+                                let v = d.lock().await.get_frame();
+                            });
+                        }
 
+                        "camera/1/instr" => {
+                            println!("camera 2");
+
+                            let d = devices[1].clone();
+                            let t = task::spawn(async move {
+                                let v = d.lock().await.get_frame();
+                            });
+                        }
+                        _ => {
+                            println!("non topic");
+                        }
+                    }
+                }
+                _ => {
+                    println!("not instr = {:?}", pkt);
+                }
+            },
+            Event::Outgoing(v) => {
+                println!("Outgoing = {:?}", v);
+            }
+        }
+    }
 }

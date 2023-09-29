@@ -2,7 +2,7 @@ use crate::interface::{CameraInfo, CameraInterface, ControlType, ImgType, ROIFor
 use rand::Rng; // ランダムな値を生成するために使用
 use std::thread;
 use std::time::Duration;
-
+use tokio;
 // CameraInfo、ROIFormat、ImgType、ControlType、ControlCapsなどのデータ構造を適切に定義する必要があります
 #[derive(Debug, Clone)]
 pub struct MockCamera {
@@ -76,8 +76,12 @@ impl CameraInterface for MockCamera {
         let buf: Vec<u8> = (0..(self.w * self.h))
             .map(|_| rng.gen_range(0..255))
             .collect();
-        // 一時的なスリープ
-        thread::sleep(Duration::from_millis(1));
+        //tokioで一時的なスリープ
+        // thread::sleep(Duration::from_secs(3));
+        println!("=================== get_frame");
+        for i in 0..1000000000 {}
+        println!("=================== end");
+
         // フレームの変換などの実装が必要です
         // OpenCVを使用する場合、RustのOpenCVバインディングを導入する必要があります
         buf
