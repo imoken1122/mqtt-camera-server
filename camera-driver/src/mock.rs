@@ -20,6 +20,9 @@ pub struct MockCamera {
 }
 
 impl CameraInterface for MockCamera {
+    fn num_devices() -> usize {
+        2
+    }
     fn new(idx: usize) -> Self {
         MockCamera {
             idx,

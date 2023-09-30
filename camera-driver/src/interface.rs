@@ -174,6 +174,7 @@ pub struct ControlCaps {
 }
 
 pub trait CameraInterface {
+    fn num_devices() -> usize;
     fn new(idx: usize) -> Self;
     fn set_roi(
         &mut self,

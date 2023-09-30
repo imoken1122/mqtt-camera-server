@@ -1,11 +1,10 @@
 use crate::interface::{CameraInfo, CameraInterface, ControlType, ImgType, ROIFormat};
 
+use base64::encode;
 use log::error;
 use serde::{Deserialize, Serialize};
-use svbony_camera_rs::{camera as svb, libsvb};
-
-use base64::encode;
 use std::sync;
+use svbony_camera_rs::{camera as svb, libsvb};
 pub fn num_svb() -> i32 {
     svb::get_num_of_camera()
 }
@@ -19,6 +18,9 @@ pub struct SVBCameraWrapper {
 }
 
 impl CameraInterface for SVBCameraWrapper {
+    fn num_devices() -> usize {
+        svb::get_num_of_camera() as usize
+    }
     fn new(idx: usize) -> Self {
         let mut camera = svb::Camera::new(idx as i32);
         camera.init();
@@ -38,7 +40,7 @@ impl CameraInterface for SVBCameraWrapper {
         let info = camera.info;
         let props = camera.prop;
 
-        let name: Vec<u8> = info.FriendlyName.iter().map(|&x| x as u8).collect();
+        let mut name: Vec<u8> = info.FriendlyName.iter().map(|&x| x as u8).collect();
         let info = CameraInfo {
             name: String::from_utf8_lossy(&name).replace("\\u0000", ""),
             idx: idx as u32,
@@ -75,6 +77,7 @@ impl CameraInterface for SVBCameraWrapper {
     }
     fn get_frame(&self) -> String {
         let buf = self.camera.get_video_frame().unwrap();
+
         encode(buf)
     }
     fn close(&self) {
@@ -122,8 +125,14 @@ impl CameraInterface for SVBCameraWrapper {
         bin: u8,
         img_type: ImgType,
     ) {
-            let svb_img_type = ImgType::to_svb(img_type);
-              self.camera.set_roi_format(startx as i32, starty as i32, width as i32, height as i32, bin as i32);
-              self.camera.set_img_type(svb_img_type);
+        let svb_img_type = ImgType::to_svb(img_type);
+        self.camera.set_roi_format(
+            startx as i32,
+            starty as i32,
+            width as i32,
+            height as i32,
+            bin as i32,
+        );
+        self.camera.set_img_type(svb_img_type);
     }
 }

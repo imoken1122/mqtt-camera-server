@@ -1,64 +1,62 @@
-use async_std;
-use camera_driver::interface::{self, CameraInterface};
+///
+///
+///
+///
+///
+///
+use camera_driver::interface;
+use camera_driver::interface::CameraInterface;
 use camera_driver::mock::MockCamera;
-use futures::executor::block_on;
-use futures::StreamExt;
+use camera_driver::svb_camera;
+use camera_driver::svb_camera::SVBCameraWrapper;
+use env_logger;
+use serde_json::error;
+use std::time::Instant;
+
 use log::{debug, error, info, warn};
-use mqtt::string_collection;
-use paho_mqtt as mqtt;
+use rumqttc::{self, AsyncClient, Event, MqttOptions, QoS};
+use serde::{de, Deserialize, Serialize};
 use std::collections::HashMap;
-use std::hash::Hash;
-use std::thread;
+use std::sync::Arc;
 use std::time::Duration;
-use std::{env, process};
-use std::sync::{Arc, Mutex};
+use tokio::sync::Mutex;
+use tokio::task;
 
-use serde::{Deserialize, Serialize};
-use serde_json;
+const ResponceTopic: &str = "camera/responce";
+const InitTopic: &str = "camera/init";
 
-fn gen_responce(camera_idxx : &i32, cmd_idx : &i32, data :String) -> Result<String,serde_json::Error>{
-    let mut res = HashMap::new();
-    res.insert("camera_idxx", camera_idxx.to_string());
-    res.insert("cmd_idx", cmd_idx.to_string());
-    res.insert("data", data);
-    let res_json = serde_json::to_string(&res);
-    res_json
+#[derive(Debug, Clone)]
+pub enum Vendor {
+    MOCK(Arc<Mutex<MockCamera>>),
+    SVBONY(Arc<Mutex<SVBCameraWrapper>>),
 }
-
-#[derive(Debug, Deserialize, Serialize)]
-struct CommandData {
-    camera_idxx: i32,
-    cmd_idx: i32,
-    data: String,
-}
-
 #[derive(Debug, PartialEq, Eq)]
-enum CameraCmd {
-    GetInfo,
-    GetProps,
+pub enum CameraCmd {
+    GetInfo = 0,
     GetStatus,
     GetRoi,
-  //  SetRoi,
-  //  GetCtrlVal,
-  //  SetCtrlVal,
-  //  StartCapture,
-  //  StopCapture,
-    NotImplemented
+    GetCtrlVal,
+    SetRoi,
+    SetCtrlVal,
+    StartCapture,
+    StopCapture,
+    Init,
+    NotImplemented = -1,
 }
 impl CameraCmd {
-    fn from_i32(cmd_idx: i32) -> CameraCmd {
+    fn from_i32(cmd_idx: &i32) -> CameraCmd {
         let cmd = match cmd_idx {
-            1 => CameraCmd::GetInfo,
-            2 => CameraCmd::GetProps,
-            3 => CameraCmd::GetStatus,
-            4 => CameraCmd::GetRoi,
-          //  5 => CameraCmd::SetRoi,
-          //  6 => CameraCmd::GetCtrlVal,
-          //  7 => CameraCmd::SetCtrlVal,
-          //  8 => CameraCmd::StartCapture,
-          //  9 => CameraCmd::StopCapture,
+            0 => CameraCmd::GetInfo,
+            1 => CameraCmd::GetStatus,
+            2 => CameraCmd::GetRoi,
+            3 => CameraCmd::GetCtrlVal,
+            4 => CameraCmd::SetRoi,
+            5 => CameraCmd::SetCtrlVal,
+            6 => CameraCmd::StartCapture,
+            7 => CameraCmd::StopCapture,
+            8 => CameraCmd::Init,
             _ => {
-                error!("Unknown command value");
+                error!("Unknown Payload value");
                 CameraCmd::NotImplemented
             }
         };
@@ -66,138 +64,283 @@ impl CameraCmd {
     }
 }
 
-struct MQTTCameraServer{
-    client: mqtt::AsyncClient,
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Payload {
+    camera_idx: i32,
+    cmd_idx: i32,
+    data: HashMap<String, String>,
 }
 
+fn get_devices() -> Vec<Vendor> {
+    let mut devices = Vec::new();
+    devices.push(Vendor::MOCK(Arc::new(Mutex::new(MockCamera::new(0)))));
+    devices.push(Vendor::MOCK(Arc::new(Mutex::new(MockCamera::new(1)))));
+    let num_svb = svb_camera::num_svb();
+    if num_svb > 0 {
+        for i in 0..num_svb {
+            devices.push(Vendor::SVBONY(Arc::new(Mutex::new(SVBCameraWrapper::new(
+                i as usize,
+            )))));
+        }
+    }
+    devices
+}
+
+#[derive(Debug, Clone)]
+pub struct MQTTCameraServer {
+    client: AsyncClient,
+}
 impl MQTTCameraServer {
-    pub fn new() -> Self {
-        let host = env::args()
-            .nth(1)
-            .unwrap_or_else(|| "tcp://localhost:1883".to_string());
-        info!("Connecting to the MQTT server at '{}'", host);
-
-        let create_opts = mqtt::CreateOptionsBuilder::new_v3()
-            .server_uri(&host)
-            .client_id("async-subscriber")
-            .finalize();
-
-        let client = mqtt::AsyncClient::new(create_opts).unwrap_or_else(|err| {
-            error!("Error creating the client: {:?}", err);
-            process::exit(1);
-        });
+    fn new(client: AsyncClient) -> Self {
         Self { client }
     }
-    pub fn connect_callback(&self) {
+    fn gen_responce(
+        &self,
+        camera_idx: &i32,
+        cmd_idx: &i32,
+        data: String,
+    ) -> Result<String, serde_json::Error> {
+        let mut res = HashMap::new();
+        res.insert("camera_idx", camera_idx.to_string());
+        res.insert("cmd_idx", cmd_idx.to_string());
+        res.insert("data", data);
+        let res_json = serde_json::to_string(&res);
+        res_json
+    }
+    async fn init_publish(&self,topic: &str, num_devices: usize) {
+        debug!("[ MQTTServer ] : Init publish to {} ", InitTopic);
+        let mut res = HashMap::new();
+        res.insert("num_device", num_devices.to_string());
+        let res_json = serde_json::to_string(&res).unwrap();
+
+        let res_json = self.gen_responce(&-1, &8, res_json).unwrap();
+        self.publish(topic, &res_json).await;
+    }
+    // Subscribes to the topic
+    async fn subscribe(&self, topics: &str) {
         self.client
-            .set_connected_callback(|_cli: &mqtt::AsyncClient| {
-                info!("connected ");
+            .subscribe(topics, QoS::ExactlyOnce)
+            .await
+            .unwrap_or_else(|e| {
+                error!("Error subscribing to topics: {:?}", e);
             });
     }
-    pub fn disconnect_callback(&self) {
+    // Publishes a message to the topic
+    async fn publish(&self, topic: &str, payload: &str) {
         self.client
-            .set_connection_lost_callback(|cli: &mqtt::AsyncClient| {
-                info!("disconnected. Attempting reconnect.");
-                thread::sleep(Duration::from_millis(2500));
-
-                cli.reconnect();
+            .publish(topic, QoS::AtLeastOnce, false, payload)
+            .await
+            .unwrap_or_else(|e| {
+                error!("Error publishing message: {:?}", e);
             });
     }
-    pub fn on_message_callback<T:CameraInterface +Send>(&self, camera : CameraWrapper<T>) {
-        let camera = Arc::clone(&camera.inner);
-        self.client.set_message_callback(move|cli, msg| {
-            if let Some(msg) = msg {
-                let payload_str = msg.payload_str().into_owned();
-                let dict: CommandData= serde_json::from_str(&payload_str).unwrap();
 
-                let camera_idx = dict.camera_idxx;
-                let cmd_idx = dict.cmd_idx;
-                let res_data   = match CameraCmd::from_i32(cmd_idx) {
+    // The process is executed according to the command index extracted from the payload.
+    pub async fn cmd_process<T: CameraInterface>(&mut self, camera: Arc<Mutex<T>>, dict: Payload) {
+        let camera_idx = dict.camera_idx;
+        let cmd_idx = dict.cmd_idx;
+        let mut data = dict.data;
 
-                    CameraCmd::GetInfo => {
-                        //let info = camera.get_info();
-                        //let info_json = serde_json::to_string(&info);
-                        let info = r#"{}"#;
-                        let info_json = serde_json::to_string(&info);
-                        info_json.unwrap()
-
-                    }
-                    CameraCmd::GetProps => {
-                        //let props = camera.get_props();
-                        let props = r#"{"props"}"#;
-                        let props_json = serde_json::to_string(&props) ;
-                        props_json.unwrap()
-                    }
-                    CameraCmd::GetStatus => {
-                        //let status = camera.get_status();
-                        let status = r#"{"statuts"}"#;
-                        let status_json = serde_json::to_string(&status);
-                        status_json.unwrap()
-                    }
-                //    CameraCmd::GetCtrlVal => {
-                //        let dict: HashMap<String, u8> = serde_json::from_str(&dict.data).unwrap();
-                //        let ctrl_type_idx = dict.get("ctrl_type").unwrap();
-                //        let ctrl_type = interface::ControlType::from_u8(ctrl_type_idx);
-                //        let val = camera. get_control_value(ctrl_type);
-                //        let val_json = serde_json::to_string(&val);
-                //        val_json.unwrap()
-                //    }
-                    CameraCmd::GetRoi => {
-                        let roi = camera.lock().unwrap().get_roi();
-                        let roi_json = serde_json::to_string(&roi).unwrap();
-                        roi_json
-                    }
-                //    CameraCmd::SetCtrlVal => {
-                //        let dict: HashMap<String, i64> = serde_json::from_str(&dict.data).unwrap();
-                //        let ctrl_type_idx = *dict.get("ctrl_type").unwrap() as u8;
-                //        let ctrl_type = interface::ControlType::from_u8(&ctrl_type_idx);
-                //        camera.set_control_value(
-                //                                ctrl_type,
-                //                                *dict.get("value").unwrap(),
-                //                                *dict.get("is_auto").unwrap() as i32,
-                //                            );
-                //        r#"{}"#.to_string()
-                //        
-                //        
-                //    }
-                //    CameraCmd::SetRoi => {
-                //        let roi : interface::ROIFormat = serde_json::from_str(&dict.data).unwrap();
-                //        let img_type = interface::ImgType::from_u8(roi.img_type );
-                //        let roi = camera.set_roi(roi.startx, roi.starty, roi.width, roi.height, roi.bin, img_type);
-                //        r#"{}"#.to_string()
-
-                //    }
-                //    CameraCmd::StartCapture => {
-                //        camera.start_capture();
-                //        r#"{}"#.to_string()
-                //    }
-                //    CameraCmd::StopCapture => {
-                //        camera.stop_capture();
-                //        r#"{}"#.to_string()
-                //    }
-                    CameraCmd::NotImplemented => {
-                        error!("Not implemented");
-                        r#"{}"#.to_string()
-                    }
-                };
-            let res : String = gen_responce(&camera_idx, &cmd_idx, res_data).unwrap();
-            let msg = mqtt::Message::new("camera/responce", res, mqtt::QOS_1);
-            cli.publish(msg);
+        let res_data = match CameraCmd::from_i32(&cmd_idx) {
+            CameraCmd::GetInfo => {
+                let info = camera.lock().await.get_info();
+                let info_json = serde_json::to_string(&info);
+                info!(
+                    "[ MQTTServer ] : GetInfo command is executed by camera_idx = {:?}",
+                    camera_idx
+                );
+                info_json.unwrap()
             }
-        });
+            CameraCmd::GetStatus => {
+                //let status = camera.get_status();
+                let status = r#"{"statuts"}"#;
+                let status_json = serde_json::to_string(&status);
+                status_json.unwrap()
+            }
+            CameraCmd::GetCtrlVal => {
+                let ctrl_type_idx: i32 = data.get("ctrl_type").unwrap().parse().unwrap();
+                let ctrl_type = interface::ControlType::from_i32(&ctrl_type_idx);
+                let val = camera.lock().await.get_control_value(ctrl_type);
+
+                data.insert("value".to_string(), val.to_string());
+                let val_json = serde_json::to_string(&data);
+                info!(
+                    "[ MQTTServer ] GetCtrlVal command is executed by camera_idx = {:?}",
+                    camera_idx
+                );
+                val_json.unwrap()
+            }
+            CameraCmd::GetRoi => {
+                let roi = camera.lock().await.get_roi();
+                let roi_json = serde_json::to_string(&roi).unwrap();
+                info!(
+                    "[ MQTTServer ] : GetRoi command is executed by camera_idx = {:?}",
+                    camera_idx
+                );
+                roi_json
+            }
+            CameraCmd::SetCtrlVal => {
+                let ctrl_type_idx: i32 = data.get("ctrl_type").unwrap().parse().unwrap();
+                let ctrl_type = interface::ControlType::from_i32(&ctrl_type_idx);
+                let value: i64 = data.get("value").unwrap().parse().unwrap();
+                camera
+                    .lock()
+                    .await
+                    .set_control_value(ctrl_type, value, false);
+                info!(
+                    "[ MQTTServer ] : SetCtrlVal command is executed by camera_idx = {:?}",
+                    camera_idx
+                );
+                r#"{}"#.to_string()
+            }
+            CameraCmd::SetRoi => {
+                let startx: u32 = data.get("startx").unwrap().parse().unwrap();
+                let starty: u32 = data.get("starty").unwrap().parse().unwrap();
+                let width: u32 = data.get("width").unwrap().parse().unwrap();
+                let height: u32 = data.get("height").unwrap().parse().unwrap();
+                let bin: u8 = data.get("bin").unwrap().parse().unwrap();
+                let img_type: i32 = data.get("img_type").unwrap().parse().unwrap();
+                let img_type = interface::ImgType::from_i32(&img_type);
+                camera
+                    .lock()
+                    .await
+                    .set_roi(startx, starty, width, height, bin, img_type);
+                info!(
+                    "[ MQTTServer ] : SetRoi command is executed by camera_idx = {:?}",
+                    camera_idx
+                );
+                r#"{}"#.to_string()
+            }
+            CameraCmd::StartCapture => {
+                camera.lock().await.start_capture();
+                camera.lock().await.set_is_capture(true);
+                info!(
+                    "[ MQTTServer ] : StartCapture command is executed by camera_idx = {:?}",
+                    camera_idx
+                );
+                while camera.lock().await.is_capture() {
+                    let buf = camera.lock().await.get_frame();
+                    let start = Instant::now();
+                    let mut res = HashMap::new();
+                    res.insert("frame", buf);
+                    let buf_json = serde_json::to_string(&res).unwrap();
+
+                    let res: String = self.gen_responce(&camera_idx, &cmd_idx, buf_json).unwrap();
+                    self.publish(ResponceTopic, &res).await;
+
+                    let end = Instant::now();
+                    let elapsed = end.duration_since(start);
+                    //debug!("Get frame time = {:?}", elapsed);
+                }
+                r#"{"frame"}"#.to_string()
+            }
+            CameraCmd::StopCapture => {
+                camera.lock().await.set_is_capture(false);
+                camera.lock().await.stop_capture();
+                info!(
+                    "[ MQTTServer ] : StopCapture command is executed by camera_idx = {:?}",
+                    camera_idx
+                );
+                r#"{}"#.to_string()
+            }
+
+            CameraCmd::NotImplemented => {
+                error!(
+                    "[ MQTTServer ] : NotImplemented command is executed by camera_idx = {:?}",
+                    camera_idx
+                );
+                r#"{}"#.to_string()
+            }
+            _ => {
+                error!(
+                    "[ MQTTServer ] : Unknown command or not using command is executed by camera_idx = {:?}",
+                    camera_idx
+                );
+                r#"{}"#.to_string()
+            }
+        };
+
+        let res: String = self.gen_responce(&camera_idx, &cmd_idx, res_data).unwrap();
+        self.publish(ResponceTopic, &res).await;
     }
 }
-struct CameraWrapper<T : CameraInterface> {
-    inner : Arc<Mutex<T>>
-}
-fn main() {
+#[tokio::main(worker_threads = 10)]
+async fn main() {
+    //-> Result<(), Box<dyn Error>> {
     env_logger::init();
-    let  camera = camera_driver::mock::MockCamera::new(0);
-    let mut arc_camera = Arc::new(Mutex::new(camera));
-    let wrapper = CameraWrapper{inner: arc_camera};
-    let mut server = MQTTCameraServer::new();
-    server.connect_callback();
-    server.disconnect_callback();
-    server.on_message_callback(wrapper);
 
+    // The mqtt server is established.
+    let mut mqttoptions = MqttOptions::new("mqtt-server", "localhost", 1883);
+    mqttoptions.set_keep_alive(Duration::from_secs(20));
+    mqttoptions.set_max_packet_size(100000000000, 1000000000000);
+    let (client, mut eventloop) = AsyncClient::new(mqttoptions.clone(), 100000000000);
+    let cli = MQTTCameraServer::new(client);
+    let cli_1 = cli.clone();
+
+    // Get all connected cameras.
+    let mut devices = get_devices();
+    task::spawn(async move {
+        cli_1.subscribe("camera/instr").await;
+        cli_1.subscribe("camera/init").await;
+    })
+    .await
+    .unwrap();
+
+    // This mqtt server receives messages from the mqtt client, and the camera executes the process according to the command index extracted in the payload.
+    while let Ok(event) = eventloop.poll().await {
+        match event {
+            Event::Incoming(pkt) => match pkt {
+                rumqttc::Packet::Publish(pkt) => {
+                    let topic = pkt.topic.as_str();
+                    let payload = std::str::from_utf8(&pkt.payload).unwrap().to_owned();
+                    let dict: Payload = serde_json::from_str(&payload).unwrap();
+                    let camera_idx = dict.camera_idx;
+                    let cmd_idx = dict.cmd_idx;
+
+                    info!("Topic: {}", topic);
+                    info!("Camera index: {}", camera_idx);
+                    info!("Command received: {}", cmd_idx);
+                    info!("Data received: {:?}", dict.data);
+
+                    match topic {
+                        "camera/init" => {
+                            debug!("[ MQTTServer] Init topic");
+                            devices = get_devices();
+                            cli.init_publish(ResponceTopic,devices.len()).await;
+                        }
+                        "camera/instr" => {
+
+                            let camera = devices[camera_idx as usize].clone();
+                            let mut cli_cln = cli.clone();
+
+                            // The process is executed asynchronously by the tokio library.
+                            tokio::spawn(async move {
+                                match camera {
+                                    Vendor::SVBONY(ref svb) => {
+                                        let svb = svb.clone();
+                                        cli_cln.cmd_process(svb, dict).await;
+                                    }
+                                    Vendor::MOCK(ref mock) => {
+                                        let mock = mock.clone();
+                                        cli_cln.cmd_process(mock, dict).await;
+                                    }
+                                    _ => error!("[ MQTTServer] Unknown camera vendor"),
+                                };
+                            });
+                        }
+                        _ => {
+                            error!("[ MQTTServer] Unknown topic");
+                        }
+                    }
+                }
+                _ => {
+                    debug!("[ MQTTServer] Other packet : {:?}", pkt);
+                }
+            },
+
+            Event::Outgoing(v) => {
+                info!("[ MQTTServer] Outgoing = {:?}", v);
+            }
+        }
+    }
 }
