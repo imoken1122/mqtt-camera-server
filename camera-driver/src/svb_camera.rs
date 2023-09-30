@@ -106,6 +106,9 @@ impl CameraInterface for SVBCameraWrapper {
     fn is_capture(&self) -> bool {
         self.is_capture
     }
+    fn set_is_capture(&mut self, is_capture: bool) {
+        self.is_capture = is_capture
+    }
     fn set_roi(
         &mut self,
         startx: u32,

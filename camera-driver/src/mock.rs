@@ -87,7 +87,7 @@ impl CameraInterface for MockCamera {
             .map(|_| rng.gen_range(0..255))
             .collect();
         println!("=================== get_frame");
-        for i in 0..1000000000 {}
+        for i in 0..10000000 {}
         println!("=================== end");
 
         let buf = base64::encode(buf);
@@ -103,6 +103,9 @@ impl CameraInterface for MockCamera {
     }
     fn is_capture(&self) -> bool {
         self.is_capture
+    }
+    fn set_is_capture(&mut self, is_capture: bool) {
+        self.is_capture = is_capture
     }
 
     fn close(&self) {

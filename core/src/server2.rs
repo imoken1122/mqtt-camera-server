@@ -78,13 +78,11 @@ pub struct Payload {
 #[derive(Debug, Clone)]
 pub struct MQTTServer {
     client: AsyncClient,
-    is_captures: Vec<bool>,
 }
 impl MQTTServer {
     fn new(client: AsyncClient) -> Self {
         Self {
             client,
-            is_captures : vec![]
         }
     }
 
@@ -114,9 +112,9 @@ impl MQTTServer {
             buf.lock().await.push(encoded);
         }
     }
-}
+
 pub async fn cmd_process<T: CameraInterface>(
-    cli: MQTTServer,
+    &mut self,
     camera: Arc<Mutex<T>>,
     dict: Payload,
 ) {
@@ -171,6 +169,7 @@ pub async fn cmd_process<T: CameraInterface>(
         }
         CameraCmd::StartCapture => {
             camera.lock().await.start_capture();
+            camera.lock().await.set_is_capture(true);
             while camera.lock().await.is_capture() {
                 let buf = camera.lock().await.get_frame() ;
                 let start = Instant::now();
@@ -179,7 +178,7 @@ pub async fn cmd_process<T: CameraInterface>(
                 let buf_json = serde_json::to_string(&res).unwrap();
 
                 let res: String = gen_responce(&camera_idx, &cmd_idx, buf_json).unwrap();
-                cli._publish(ResponceTopic, &res).await;
+                self._publish(ResponceTopic, &res).await;
 
                 //self.frame_buf.push(buf);
                 let end = Instant::now();
@@ -188,6 +187,7 @@ pub async fn cmd_process<T: CameraInterface>(
             r#"{"frame"}"#.to_string()
         }
         CameraCmd::StopCapture => {
+            camera.lock().await.set_is_capture(false);
             camera.lock().await.stop_capture();
 
             r#"{}"#.to_string()
@@ -200,7 +200,8 @@ pub async fn cmd_process<T: CameraInterface>(
     };
 
     let res: String = gen_responce(&camera_idx, &cmd_idx, res_data).unwrap();
-    cli._publish(ResponceTopic, &res).await;
+    self._publish(ResponceTopic, &res).await;
+}
 }
 #[tokio::main(worker_threads = 10)]
 async fn main() {
@@ -223,7 +224,6 @@ async fn main() {
     mqttoptions.set_max_packet_size(100000000000, 1000000000000);
     let (client, mut eventloop) = AsyncClient::new(mqttoptions.clone(), 100000000000);
     let mut cli = MQTTServer::new(client);
-    cli.is_captures = vec![false; devices.len()];
     let cli_1 = cli.clone();
     task::spawn(async move {
         cli_1.subscribe("camera/instr").await;
@@ -245,16 +245,16 @@ async fn main() {
                     println!("data = {:?}", dict.data);
 
                     let camera = devices[camera_idx as usize].clone();
-                    let cli_cln = cli.clone();
+                    let mut cli_cln = cli.clone();
                     tokio::spawn(async move {
                         match camera {
                             Vendor::SVBONY(ref svb) => {
                                 let svb = svb.clone();
-                                cmd_process(cli_cln, svb, dict).await;
+                                cli_cln.cmd_process( svb, dict).await;
                             }
                             Vendor::MOCK(ref mock) => {
                                 let mock = mock.clone();
-                                cmd_process(cli_cln, mock, dict).await;
+                                cli_cln.cmd_process( mock, dict).await;
                             }
                             _ => panic!("Unknown camera type"),
                         };
