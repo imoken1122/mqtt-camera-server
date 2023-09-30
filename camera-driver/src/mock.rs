@@ -98,7 +98,7 @@ impl CameraInterface for MockCamera {
         0
     }
 
-    fn set_control_value(&self, ctrl_type: ControlType, value: i64, is_auto: i32) {
+    fn set_control_value(&self, ctrl_type: ControlType, value: i64, is_auto: bool) {
         //
     }
     fn is_capture(&self) -> bool {

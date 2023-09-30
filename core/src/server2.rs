@@ -4,6 +4,7 @@ use camera_driver::mock::MockCamera;
 use camera_driver::svb_camera;
 use camera_driver::svb_camera::SVBCameraWrapper;
 use env_logger;
+use serde_json::error;
 use std::time::Instant;
 
 use log::{debug, error, info, warn};
@@ -94,7 +95,7 @@ impl MQTTServer {
                 error!("Error subscribing to topics: {:?}", e);
             });
     }
-    async fn _publish(&self, topic: &str, payload: &str) {
+    async fn publish(&self, topic: &str, payload: &str) {
         self.client
             .publish(topic, QoS::AtMostOnce, false, payload)
             .await
@@ -126,6 +127,7 @@ pub async fn cmd_process<T: CameraInterface>(
         CameraCmd::GetInfo => {
             let info = camera.lock().await.get_info();
             let info_json = serde_json::to_string(&info);
+            info!("[ MQTTServer ] : GetInfo command is executed by camera_idx = {:?}", camera_idx);
             info_json.unwrap()
         }
         CameraCmd::GetStatus => {
@@ -139,18 +141,21 @@ pub async fn cmd_process<T: CameraInterface>(
             let ctrl_type = interface::ControlType::from_i32(&ctrl_type_idx);
             let val = camera.lock().await.get_control_value(ctrl_type);
             let val_json = serde_json::to_string(&val);
+            info!("[ MQTTServer ] GetCtrlVal command is executed by camera_idx = {:?}", camera_idx);
             val_json.unwrap()
         }
         CameraCmd::GetRoi => {
             let roi = camera.lock().await.get_roi();
             let roi_json = serde_json::to_string(&roi).unwrap();
+            info!("[ MQTTServer ] : GetRoi command is executed by camera_idx = {:?}", camera_idx);
             roi_json
         }
         CameraCmd::SetCtrlVal => {
             let ctrl_type_idx: i32 = data.get("ctrl_type").unwrap().parse().unwrap();
             let ctrl_type = interface::ControlType::from_i32(&ctrl_type_idx);
             let value: i64 = data.get("value").unwrap().parse().unwrap();
-            camera.lock().await.set_control_value(ctrl_type, value, 0);
+            camera.lock().await.set_control_value(ctrl_type, value, false);
+            info!("[ MQTTServer ] : SetCtrlVal command is executed by camera_idx = {:?}", camera_idx);
             r#"{}"#.to_string()
         }
         CameraCmd::SetRoi => {
@@ -165,11 +170,17 @@ pub async fn cmd_process<T: CameraInterface>(
                 .lock()
                 .await
                 .set_roi(startx, starty, width, height, bin, img_type);
+            info!(
+                "[ MQTTServer ] : SetRoi command is executed by camera_idx = {:?}",
+                camera_idx);
             r#"{}"#.to_string()
         }
         CameraCmd::StartCapture => {
             camera.lock().await.start_capture();
             camera.lock().await.set_is_capture(true);
+            info!(
+                "[ MQTTServer ] : StartCapture command is executed by camera_idx = {:?}",
+                camera_idx);
             while camera.lock().await.is_capture() {
                 let buf = camera.lock().await.get_frame() ;
                 let start = Instant::now();
@@ -178,29 +189,32 @@ pub async fn cmd_process<T: CameraInterface>(
                 let buf_json = serde_json::to_string(&res).unwrap();
 
                 let res: String = gen_responce(&camera_idx, &cmd_idx, buf_json).unwrap();
-                self._publish(ResponceTopic, &res).await;
+                self.publish(ResponceTopic, &res).await;
 
-                //self.frame_buf.push(buf);
                 let end = Instant::now();
                 let elapsed = end.duration_since(start);
+                //debug!("Get frame time = {:?}", elapsed);
             }
             r#"{"frame"}"#.to_string()
         }
         CameraCmd::StopCapture => {
             camera.lock().await.set_is_capture(false);
             camera.lock().await.stop_capture();
-
+            info!(
+                "[ MQTTServer ] : StopCapture command is executed by camera_idx = {:?}",
+                camera_idx);
             r#"{}"#.to_string()
         }
 
         CameraCmd::NotImplemented => {
-            error!("Not implemented");
+
+            error!("[ MQTTServer ] : NotImplemented command is executed by camera_idx = {:?}", camera_idx);
             r#"{}"#.to_string()
         }
     };
 
     let res: String = gen_responce(&camera_idx, &cmd_idx, res_data).unwrap();
-    self._publish(ResponceTopic, &res).await;
+    self.publish(ResponceTopic, &res).await;
 }
 }
 #[tokio::main(worker_threads = 10)]

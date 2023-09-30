@@ -191,7 +191,7 @@ pub trait CameraInterface {
     fn stop_capture(&mut self);
     fn get_frame(&self) -> String;
     fn get_control_value(&self, ctrl_type: ControlType) -> i64;
-    fn set_control_value(&self, ctrl_type: ControlType, value: i64, is_auto: i32);
+    fn set_control_value(&self, ctrl_type: ControlType, value: i64, is_auto: bool);
     fn get_info(&self) -> CameraInfo;
     fn is_capture(&self) -> bool;
     fn set_is_capture(&mut self, is_capture: bool);

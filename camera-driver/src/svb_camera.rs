@@ -87,7 +87,11 @@ impl CameraInterface for SVBCameraWrapper {
         self.roi.clone()
     }
 
-    fn set_control_value(&self, ctrl_type: ControlType, value: i64, is_auto: i32) {}
+    fn set_control_value(&self, ctrl_type: ControlType, value: i64, is_auto: bool) {
+        let svb_ctrl_type = ControlType::to_svb(ctrl_type);
+        self.camera
+            .set_ctl_value(svb_ctrl_type, value, is_auto as u32);
+    }
     fn get_control_value(&self, ctrl_type: ControlType) -> i64 {
         let svb_ctrl_type = ControlType::to_svb(ctrl_type);
         match self.camera.get_ctl_value(svb_ctrl_type) {
@@ -118,7 +122,8 @@ impl CameraInterface for SVBCameraWrapper {
         bin: u8,
         img_type: ImgType,
     ) {
-        //    let svb_img_type = img_type.to_svb();
-        //      self.camera.set_roi(startx as i32, starty as i32, width as i32, height as i32, bin as i32, svb_img_type);
+            let svb_img_type = ImgType::to_svb(img_type);
+              self.camera.set_roi_format(startx as i32, starty as i32, width as i32, height as i32, bin as i32);
+              self.camera.set_img_type(svb_img_type);
     }
 }
