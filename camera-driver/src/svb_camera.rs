@@ -1,10 +1,13 @@
 use crate::interface::{CameraInfo, CameraInterface, ControlType, ImgType, ROIFormat};
+
 use log::error;
 use serde::{Deserialize, Serialize};
 use svbony_camera_rs::{camera as svb, libsvb};
 
+use base64::encode;
+use std::sync;
 pub fn num_svb() -> i32 {
-   svb::get_num_of_camera()
+    svb::get_num_of_camera()
 }
 
 #[derive(Debug, Clone)]
@@ -12,13 +15,13 @@ pub struct SVBCameraWrapper {
     camera: svb::Camera,
     roi: ROIFormat,
     info: CameraInfo,
+    is_capture: bool,
 }
 
 impl CameraInterface for SVBCameraWrapper {
     fn new(idx: usize) -> Self {
         let mut camera = svb::Camera::new(idx as i32);
         camera.init();
-        
 
         let roi = camera.roi;
         let img_type = camera.get_img_type().unwrap();
@@ -37,14 +40,15 @@ impl CameraInterface for SVBCameraWrapper {
 
         let name: Vec<u8> = info.FriendlyName.iter().map(|&x| x as u8).collect();
         let info = CameraInfo {
-            name: String::from_utf8_lossy(&name).into_owned(),
+            name: String::from_utf8_lossy(&name).replace("\\u0000", ""),
             idx: idx as u32,
             max_width: props.MaxWidth as u32,
             max_height: props.MaxHeight as u32,
             supported_img_type: props
                 .SupportedVideoFormat
                 .iter()
-                .map(|x| ImgType::from_i32(x ))
+                .take_while(|&x| *x != -1)
+                .map(|x| ImgType::from_i32(x))
                 .collect(),
             supported_bins: props.SupportedBins.iter().map(|x| *x as u8).collect(),
             is_coolable: false,
@@ -57,17 +61,21 @@ impl CameraInterface for SVBCameraWrapper {
             camera,
             roi,
             info,
+            is_capture: false,
         }
     }
 
-    fn start_capture(&self) {
+    fn start_capture(&mut self) {
         self.camera.start_video_capture();
+        self.is_capture = true
     }
-    fn stop_capture(&self) {
+    fn stop_capture(&mut self) {
         self.camera.stop_video_capture();
+        self.is_capture = false
     }
-    fn get_frame(&self) -> Vec<u8> {
-        self.camera.get_video_frame().unwrap()
+    fn get_frame(&self) -> String {
+        let buf = self.camera.get_video_frame().unwrap();
+        encode(buf)
     }
     fn close(&self) {
         self.camera.close();
@@ -92,9 +100,12 @@ impl CameraInterface for SVBCameraWrapper {
     }
     fn get_img_type(&self) -> ImgType {
         let svb_img_t = self.camera.get_img_type().unwrap();
-        ImgType::from_i32(&svb_img_t )
+        ImgType::from_i32(&svb_img_t)
     }
     fn set_img_type(&mut self, img_type: ImgType) {}
+    fn is_capture(&self) -> bool {
+        self.is_capture
+    }
     fn set_roi(
         &mut self,
         startx: u32,

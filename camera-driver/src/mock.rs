@@ -1,8 +1,14 @@
 use crate::interface::{CameraInfo, CameraInterface, ControlType, ImgType, ROIFormat};
+use base64::{
+    alphabet,
+    engine::{self, general_purpose},
+    Engine as _,
+};
 use rand::Rng; // ランダムな値を生成するために使用
 use std::thread;
 use std::time::Duration;
 use tokio;
+
 // CameraInfo、ROIFormat、ImgType、ControlType、ControlCapsなどのデータ構造を適切に定義する必要があります
 #[derive(Debug, Clone)]
 pub struct MockCamera {
@@ -67,26 +73,26 @@ impl CameraInterface for MockCamera {
         ImgType::RAW8
     }
 
-    fn start_capture(&self) {}
+    fn start_capture(&mut self) {
+        self.is_capture = true
+    }
 
-    fn stop_capture(&self) {}
+    fn stop_capture(&mut self) {
+        self.is_capture = false
+    }
 
-    fn get_frame(&self) -> Vec<u8> {
+    fn get_frame(&self) -> String {
         let mut rng = rand::thread_rng();
         let buf: Vec<u8> = (0..(self.w * self.h))
             .map(|_| rng.gen_range(0..255))
             .collect();
-        //tokioで一時的なスリープ
-        // thread::sleep(Duration::from_secs(3));
         println!("=================== get_frame");
         for i in 0..1000000000 {}
         println!("=================== end");
 
-        // フレームの変換などの実装が必要です
-        // OpenCVを使用する場合、RustのOpenCVバインディングを導入する必要があります
+        let buf = base64::encode(buf);
         buf
     }
-
     fn get_control_value(&self, ctrl_type: ControlType) -> i64 {
         // get_control_valueメソッドの実装
         0
@@ -94,6 +100,9 @@ impl CameraInterface for MockCamera {
 
     fn set_control_value(&self, ctrl_type: ControlType, value: i64, is_auto: i32) {
         //
+    }
+    fn is_capture(&self) -> bool {
+        self.is_capture
     }
 
     fn close(&self) {
