@@ -5,9 +5,6 @@ use log::error;
 use serde::{Deserialize, Serialize};
 use std::sync;
 use svbony_camera_rs::{camera as svb, libsvb};
-pub fn num_svb() -> i32 {
-    svb::get_num_of_camera()
-}
 
 #[derive(Debug, Clone)]
 pub struct SVBCameraWrapper {

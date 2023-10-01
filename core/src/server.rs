@@ -1,4 +1,17 @@
 ///
+/// 
+/// MQTT Camera Server 
+/// 
+/// 
+/// 
+/// 
+/// 
+/// 
+///
+/// 
+/// 
+/// 
+/// 
 ///
 ///
 ///
@@ -11,6 +24,7 @@ use camera_driver::svb_camera;
 use camera_driver::svb_camera::SVBCameraWrapper;
 use env_logger;
 use serde_json::error;
+use std::hash::Hash;
 use std::time::Instant;
 
 use log::{debug, error, info, warn};
@@ -73,9 +87,14 @@ pub struct Payload {
 
 fn get_devices() -> Vec<Vendor> {
     let mut devices = Vec::new();
-    devices.push(Vendor::MOCK(Arc::new(Mutex::new(MockCamera::new(0)))));
-    devices.push(Vendor::MOCK(Arc::new(Mutex::new(MockCamera::new(1)))));
-    let num_svb = svb_camera::num_svb();
+    let num_mock = MockCamera::num_devices();
+    if num_mock > 0 {
+        for i in 0..num_mock {
+            devices.push(Vendor::MOCK(Arc::new(Mutex::new(MockCamera::new(i)))));
+        }
+    }
+
+    let num_svb = SVBCameraWrapper::num_devices();
     if num_svb > 0 {
         for i in 0..num_svb {
             devices.push(Vendor::SVBONY(Arc::new(Mutex::new(SVBCameraWrapper::new(
@@ -107,7 +126,7 @@ impl MQTTCameraServer {
         let res_json = serde_json::to_string(&res);
         res_json
     }
-    async fn init_publish(&self,topic: &str, num_devices: usize) {
+    async fn init_publish(&self, topic: &str, num_devices: usize) {
         debug!("[ MQTTServer ] : Init publish to {} ", InitTopic);
         let mut res = HashMap::new();
         res.insert("num_device", num_devices.to_string());
@@ -143,6 +162,18 @@ impl MQTTCameraServer {
 
         let res_data = match CameraCmd::from_i32(&cmd_idx) {
             CameraCmd::GetInfo => {
+
+                //
+                // incoming and outcoming data field  :
+                // {    name,
+                //      idx,
+                //      max_width,
+                //      max_height,
+                //      supported_img_type,
+                //      supported_bins,
+                //      is_coolable
+                // }
+
                 let info = camera.lock().await.get_info();
                 let info_json = serde_json::to_string(&info);
                 info!(
@@ -158,6 +189,11 @@ impl MQTTCameraServer {
                 status_json.unwrap()
             }
             CameraCmd::GetCtrlVal => {
+                // incoming and outcoming data field  :
+                // {    ctrl_type
+                //    value 
+                // }
+
                 let ctrl_type_idx: i32 = data.get("ctrl_type").unwrap().parse().unwrap();
                 let ctrl_type = interface::ControlType::from_i32(&ctrl_type_idx);
                 let val = camera.lock().await.get_control_value(ctrl_type);
@@ -171,6 +207,15 @@ impl MQTTCameraServer {
                 val_json.unwrap()
             }
             CameraCmd::GetRoi => {
+                //
+                // incoming and outcoming data field  :
+                // {    startx, 
+                //      starty,
+                //      width,
+                //      height,
+                //      bin,
+                //      img_type
+                // }
                 let roi = camera.lock().await.get_roi();
                 let roi_json = serde_json::to_string(&roi).unwrap();
                 info!(
@@ -180,6 +225,14 @@ impl MQTTCameraServer {
                 roi_json
             }
             CameraCmd::SetCtrlVal => {
+                // Return ctrl value  after set control value
+                //
+                // incoming and outcoming data field  :
+                // {    
+                //      ctrl_type : int,
+                //      value : int
+                // }
+
                 let ctrl_type_idx: i32 = data.get("ctrl_type").unwrap().parse().unwrap();
                 let ctrl_type = interface::ControlType::from_i32(&ctrl_type_idx);
                 let value: i64 = data.get("value").unwrap().parse().unwrap();
@@ -191,9 +244,29 @@ impl MQTTCameraServer {
                     "[ MQTTServer ] : SetCtrlVal command is executed by camera_idx = {:?}",
                     camera_idx
                 );
-                r#"{}"#.to_string()
+
+                let val = camera.lock().await.get_control_value(ctrl_type);
+                let mut res = HashMap::new();
+                res.insert("value".to_string(), val.to_string());
+                res.insert("ctrl_type".to_string(), ctrl_type_idx.to_string());
+
+                let ctrl_json = serde_json::to_string(&res).unwrap();
+                ctrl_json
+
+
             }
             CameraCmd::SetRoi => {
+                // Return ROI after set ROI  
+                // responce data field  : 
+                // {    startx : int, 
+                //      starty : int,
+                //      width : int ,
+                //      height : int,
+                //      bin : int,
+                //      img_type : int
+                // }
+
+
                 let startx: u32 = data.get("startx").unwrap().parse().unwrap();
                 let starty: u32 = data.get("starty").unwrap().parse().unwrap();
                 let width: u32 = data.get("width").unwrap().parse().unwrap();
@@ -209,9 +282,21 @@ impl MQTTCameraServer {
                     "[ MQTTServer ] : SetRoi command is executed by camera_idx = {:?}",
                     camera_idx
                 );
-                r#"{}"#.to_string()
+                let roi = camera.lock().await.get_roi();
+                let roi_json = serde_json::to_string(&roi).unwrap();
+                roi_json
             }
             CameraCmd::StartCapture => {
+                //
+                // responce data field  : 
+                // {
+                //       frame : base64 encoded raw data
+                // }
+                //
+                // The camera starts capturing and returns the frame data.
+                // The frame data is encoded in base64
+                // keep to catpure and publish frame data until StopCapture command is executed.
+                // 
                 camera.lock().await.start_capture();
                 camera.lock().await.set_is_capture(true);
                 info!(
@@ -235,6 +320,10 @@ impl MQTTCameraServer {
                 r#"{"frame"}"#.to_string()
             }
             CameraCmd::StopCapture => {
+
+                //  
+                //  camera stop capturing and set is_capture = false
+
                 camera.lock().await.set_is_capture(false);
                 camera.lock().await.stop_capture();
                 info!(
@@ -296,20 +385,21 @@ async fn main() {
                     let dict: Payload = serde_json::from_str(&payload).unwrap();
                     let camera_idx = dict.camera_idx;
                     let cmd_idx = dict.cmd_idx;
-
-                    info!("Topic: {}", topic);
-                    info!("Camera index: {}", camera_idx);
-                    info!("Command received: {}", cmd_idx);
-                    info!("Data received: {:?}", dict.data);
+                    info!("[ MQTTServer] ====== Received Payload =======" );
+                    info!("[ MQTTServer] Topic:            {}", topic);
+                    info!("[ MQTTServer] Camera index:     {}", camera_idx);
+                    info!("[ MQTTServer] Command received: {}", cmd_idx);
+                    info!("[ MQTTServer] Data received:    {:?}", dict.data);
 
                     match topic {
+                        // init topic is get number of connected camera 
                         "camera/init" => {
                             debug!("[ MQTTServer] Init topic");
                             devices = get_devices();
-                            cli.init_publish(ResponceTopic,devices.len()).await;
+                            cli.init_publish(ResponceTopic, devices.len()).await;
                         }
+                        // instr topic is get camera command and execute command
                         "camera/instr" => {
-
                             let camera = devices[camera_idx as usize].clone();
                             let mut cli_cln = cli.clone();
 
