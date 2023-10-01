@@ -1,17 +1,17 @@
 ///
-/// 
-/// MQTT Camera Server 
-/// 
-/// 
-/// 
-/// 
-/// 
-/// 
 ///
-/// 
-/// 
-/// 
-/// 
+/// MQTT Camera Server
+///
+///
+///
+///
+///
+///
+///
+///
+///
+///
+///
 ///
 ///
 ///
@@ -80,6 +80,7 @@ impl CameraCmd {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Payload {
+    transaction_id: String,
     camera_idx: i32,
     cmd_idx: i32,
     data: HashMap<String, String>,
@@ -104,6 +105,18 @@ fn get_devices() -> Vec<Vendor> {
     }
     devices
 }
+async fn close_devices(devices: &Vec<Vendor>) {
+    for device in devices {
+        match device {
+            Vendor::MOCK(mock) => {
+                mock.lock().await.close();
+            }
+            Vendor::SVBONY(svb) => {
+                svb.lock().await.close();
+            }
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct MQTTCameraServer {
@@ -115,25 +128,22 @@ impl MQTTCameraServer {
     }
     fn gen_responce(
         &self,
+        t_id: &String,
         camera_idx: &i32,
         cmd_idx: &i32,
         data: String,
     ) -> Result<String, serde_json::Error> {
         let mut res = HashMap::new();
+        res.insert("transaction_id", t_id.to_string());
         res.insert("camera_idx", camera_idx.to_string());
         res.insert("cmd_idx", cmd_idx.to_string());
         res.insert("data", data);
         let res_json = serde_json::to_string(&res);
         res_json
     }
-    async fn init_publish(&self, topic: &str, num_devices: usize) {
-        debug!("[ MQTTServer ] : Init publish to {} ", InitTopic);
-        let mut res = HashMap::new();
-        res.insert("num_device", num_devices.to_string());
-        let res_json = serde_json::to_string(&res).unwrap();
-
-        let res_json = self.gen_responce(&-1, &8, res_json).unwrap();
-        self.publish(topic, &res_json).await;
+    fn to_json(&self, responce: &HashMap<String, String>) -> Result<String, serde_json::Error> {
+        let res_json = serde_json::to_string(&responce);
+        res_json
     }
     // Subscribes to the topic
     async fn subscribe(&self, topics: &str) {
@@ -156,13 +166,13 @@ impl MQTTCameraServer {
 
     // The process is executed according to the command index extracted from the payload.
     pub async fn cmd_process<T: CameraInterface>(&mut self, camera: Arc<Mutex<T>>, dict: Payload) {
+        let transaction_id = dict.transaction_id;
         let camera_idx = dict.camera_idx;
         let cmd_idx = dict.cmd_idx;
         let mut data = dict.data;
 
         let res_data = match CameraCmd::from_i32(&cmd_idx) {
             CameraCmd::GetInfo => {
-
                 //
                 // incoming and outcoming data field  :
                 // {    name,
@@ -191,7 +201,7 @@ impl MQTTCameraServer {
             CameraCmd::GetCtrlVal => {
                 // incoming and outcoming data field  :
                 // {    ctrl_type
-                //    value 
+                //    value
                 // }
 
                 let ctrl_type_idx: i32 = data.get("ctrl_type").unwrap().parse().unwrap();
@@ -209,7 +219,7 @@ impl MQTTCameraServer {
             CameraCmd::GetRoi => {
                 //
                 // incoming and outcoming data field  :
-                // {    startx, 
+                // {    startx,
                 //      starty,
                 //      width,
                 //      height,
@@ -228,7 +238,7 @@ impl MQTTCameraServer {
                 // Return ctrl value  after set control value
                 //
                 // incoming and outcoming data field  :
-                // {    
+                // {
                 //      ctrl_type : int,
                 //      value : int
                 // }
@@ -252,20 +262,17 @@ impl MQTTCameraServer {
 
                 let ctrl_json = serde_json::to_string(&res).unwrap();
                 ctrl_json
-
-
             }
             CameraCmd::SetRoi => {
-                // Return ROI after set ROI  
-                // responce data field  : 
-                // {    startx : int, 
+                // Return ROI after set ROI
+                // responce data field  :
+                // {    startx : int,
                 //      starty : int,
                 //      width : int ,
                 //      height : int,
                 //      bin : int,
                 //      img_type : int
                 // }
-
 
                 let startx: u32 = data.get("startx").unwrap().parse().unwrap();
                 let starty: u32 = data.get("starty").unwrap().parse().unwrap();
@@ -288,7 +295,7 @@ impl MQTTCameraServer {
             }
             CameraCmd::StartCapture => {
                 //
-                // responce data field  : 
+                // responce data field  :
                 // {
                 //       frame : base64 encoded raw data
                 // }
@@ -296,7 +303,7 @@ impl MQTTCameraServer {
                 // The camera starts capturing and returns the frame data.
                 // The frame data is encoded in base64
                 // keep to catpure and publish frame data until StopCapture command is executed.
-                // 
+                //
                 camera.lock().await.start_capture();
                 camera.lock().await.set_is_capture(true);
                 info!(
@@ -310,18 +317,19 @@ impl MQTTCameraServer {
                     res.insert("frame", buf);
                     let buf_json = serde_json::to_string(&res).unwrap();
 
-                    let res: String = self.gen_responce(&camera_idx, &cmd_idx, buf_json).unwrap();
+                    let res: String = self
+                        .gen_responce(&transaction_id, &camera_idx, &cmd_idx, buf_json)
+                        .unwrap();
                     self.publish(ResponceTopic, &res).await;
 
                     let end = Instant::now();
                     let elapsed = end.duration_since(start);
                     //debug!("Get frame time = {:?}", elapsed);
                 }
-                r#"{"frame"}"#.to_string()
+                r#"{}"#.to_string()
             }
             CameraCmd::StopCapture => {
-
-                //  
+                //
                 //  camera stop capturing and set is_capture = false
 
                 camera.lock().await.set_is_capture(false);
@@ -349,7 +357,9 @@ impl MQTTCameraServer {
             }
         };
 
-        let res: String = self.gen_responce(&camera_idx, &cmd_idx, res_data).unwrap();
+        let res: String = self
+            .gen_responce(&transaction_id, &camera_idx, &cmd_idx, res_data)
+            .unwrap();
         self.publish(ResponceTopic, &res).await;
     }
 }
@@ -367,7 +377,9 @@ async fn main() {
     let cli_1 = cli.clone();
 
     // Get all connected cameras.
-    let mut devices = get_devices();
+    //let mut devices = get_devices();
+    let mut devices: Vec<Vendor> = Vec::new();
+
     task::spawn(async move {
         cli_1.subscribe("camera/instr").await;
         cli_1.subscribe("camera/init").await;
@@ -385,18 +397,26 @@ async fn main() {
                     let dict: Payload = serde_json::from_str(&payload).unwrap();
                     let camera_idx = dict.camera_idx;
                     let cmd_idx = dict.cmd_idx;
-                    info!("[ MQTTServer] ====== Received Payload =======" );
+                    let t_id = &dict.transaction_id;
+
+                    info!("[ MQTTServer] ====== Received Payload =======");
                     info!("[ MQTTServer] Topic:            {}", topic);
                     info!("[ MQTTServer] Camera index:     {}", camera_idx);
                     info!("[ MQTTServer] Command received: {}", cmd_idx);
                     info!("[ MQTTServer] Data received:    {:?}", dict.data);
 
                     match topic {
-                        // init topic is get number of connected camera 
+                        // init topic is get number of connected camera
                         "camera/init" => {
-                            debug!("[ MQTTServer] Init topic");
+                            debug!("[ MQTTServer ] : Init publish to {} ", InitTopic);
+                            close_devices(&devices).await;
                             devices = get_devices();
-                            cli.init_publish(ResponceTopic, devices.len()).await;
+
+                            let mut data = HashMap::new();
+                            data.insert("num_device".to_string(), devices.len().to_string());
+                            let data = cli.to_json(&data).unwrap();
+                            let res_json = cli.gen_responce(t_id, &-1, &8, data).unwrap();
+                            cli.publish(ResponceTopic, &res_json).await;
                         }
                         // instr topic is get camera command and execute command
                         "camera/instr" => {

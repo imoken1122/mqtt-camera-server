@@ -20,6 +20,7 @@ impl CameraInterface for SVBCameraWrapper {
     }
     fn new(idx: usize) -> Self {
         let mut camera = svb::Camera::new(idx as i32);
+
         camera.init();
 
         let roi = camera.roi;
