@@ -54,7 +54,7 @@ impl CameraInterface for SVBCameraWrapper {
             is_coolable: false,
         };
 
-        camera.adjust_white_blance();
+        camera.adjust_white_balance();
         camera.set_ctl_value(libsvb::SVB_CONTROL_TYPE_SVB_FLIP, 3, 0);
 
         SVBCameraWrapper {
@@ -88,7 +88,7 @@ impl CameraInterface for SVBCameraWrapper {
         self.roi.clone()
     }
 
-    fn set_control_value(&self, ctrl_type: ControlType, value: i64, is_auto: bool) {
+    fn set_control_value(&self, ctrl_type: ControlType, value: i64, is_auto: i64) {
         let svb_ctrl_type = ControlType::to_svb(ctrl_type);
         self.camera
             .set_ctl_value(svb_ctrl_type, value, is_auto as u32);
@@ -132,5 +132,17 @@ impl CameraInterface for SVBCameraWrapper {
             bin as i32,
         );
         self.camera.set_img_type(svb_img_type);
+        let roi = self.camera.roi;
+        self.roi = ROIFormat {
+            startx: roi.startx as u32,
+            starty: roi.starty as u32,
+            width: roi.width as u32,
+            height: roi.height as u32,
+            bin: roi.bin as u8,
+            img_type: img_type as u8,
+        }
+    }
+    fn adjust_white_balance(&self) {
+        self.camera.adjust_white_balance();
     }
 }

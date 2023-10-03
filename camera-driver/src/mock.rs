@@ -21,7 +21,7 @@ pub struct MockCamera {
 
 impl CameraInterface for MockCamera {
     fn num_devices() -> usize {
-        2
+       0
     }
     fn new(idx: usize) -> Self {
         MockCamera {
@@ -90,7 +90,8 @@ impl CameraInterface for MockCamera {
             .map(|_| rng.gen_range(0..255))
             .collect();
         println!("=================== get_frame");
-        for i in 0..10000000 {}
+        let num = rng.gen_range(0..5) * 100000;
+        for i in 0..num{}
         println!("=================== end");
 
         let buf = base64::encode(buf);
@@ -100,9 +101,10 @@ impl CameraInterface for MockCamera {
         // get_control_valueメソッドの実装
         0
     }
-
-    fn set_control_value(&self, ctrl_type: ControlType, value: i64, is_auto: bool) {
-        //
+    fn adjust_white_balance(&self) {
+        
+    }
+    fn set_control_value(&self, ctrl_type: ControlType, value: i64, is_auto: i64) {
     }
     fn is_capture(&self) -> bool {
         self.is_capture

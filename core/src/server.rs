@@ -55,6 +55,7 @@ pub enum CameraCmd {
     StartCapture,
     StopCapture,
     Init,
+    AdjustWB,
     NotImplemented = -1,
 }
 impl CameraCmd {
@@ -69,6 +70,7 @@ impl CameraCmd {
             6 => CameraCmd::StartCapture,
             7 => CameraCmd::StopCapture,
             8 => CameraCmd::Init,
+            9 => CameraCmd::AdjustWB,
             _ => {
                 error!("Unknown Payload value");
                 CameraCmd::NotImplemented
@@ -246,10 +248,12 @@ impl MQTTCameraServer {
                 let ctrl_type_idx: i32 = data.get("ctrl_type").unwrap().parse().unwrap();
                 let ctrl_type = interface::ControlType::from_i32(&ctrl_type_idx);
                 let value: i64 = data.get("value").unwrap().parse().unwrap();
+                let is_auto =   data.get("is_auto").unwrap().parse().unwrap();
+              
                 camera
                     .lock()
                     .await
-                    .set_control_value(ctrl_type, value, false);
+                    .set_control_value(ctrl_type, value, is_auto);
                 info!(
                     "[ MQTTServer ] : SetCtrlVal command is executed by camera_idx = {:?}",
                     camera_idx
@@ -346,6 +350,10 @@ impl MQTTCameraServer {
                     "[ MQTTServer ] : NotImplemented command is executed by camera_idx = {:?}",
                     camera_idx
                 );
+                r#"{}"#.to_string()
+            }
+            CameraCmd::AdjustWB  => {
+                camera.lock().await.adjust_white_balance();
                 r#"{}"#.to_string()
             }
             _ => {
